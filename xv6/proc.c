@@ -124,6 +124,7 @@ userinit(void)
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
   p = allocproc();
+  p->tickets = 1;
   
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
@@ -216,6 +217,8 @@ fork(void)
 
   np->state = RUNNABLE;
 
+  np->tickets = 1;
+
   release(&ptable.lock);
 
   return pid;
@@ -265,6 +268,12 @@ exit(void)
   curproc->state = ZOMBIE;
   sched();
   panic("zombie exit");
+}
+
+int lcg(){
+  static int next = 1;
+  next = (1103515245*next+12345)%2147483648;
+  return next;
 }
 
 // Wait for a child process to exit and return its pid.
@@ -325,31 +334,59 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
+  int total;
+  int running_sum;
+  int winner;
   
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
+    total = 0;
+    running_sum = 0;
+
+    // Loop over process table to sum total tickets
     acquire(&ptable.lock);
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
-
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+      total = total+p->tickets;
     }
+
+    if (total==0){
+      release(&ptable.lock);
+      continue;
+    }
+
+    //Choose random number between [0,total]
+    winner = lcg()%total;
+
+    //find winner process
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+      running_sum = running_sum+p->tickets;
+      if (running_sum>winner){
+        break;
+      }
+    }
+
+    // Switch to chosen process.  It is the process's job
+    // to release ptable.lock and then reacquire it
+    // before jumping back to us.
+    p->ticks = 0;
+    c->proc = p;
+    switchuvm(p);
+    p->state = RUNNING;
+
+    swtch(&(c->scheduler), p->context);
+    switchkvm();
+
+    // Process is done running for now.
+    // It should have changed its p->state before coming back.
+    c->proc = 0;
+    p->ticks++;
+    
     release(&ptable.lock);
 
   }
@@ -532,3 +569,11 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+int settickets(int tickets){
+  acquire(&ptable.lock);
+  myproc()->tickets = tickets;
+  release(&ptable.lock);
+  return 0;
+}
+
